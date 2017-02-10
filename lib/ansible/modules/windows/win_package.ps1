@@ -158,29 +158,31 @@ Function Validate-StandardArguments
         $ProductId,
         $Name
     )
-    
-    Trace-Message "Validate-StandardArguments, Path was $Path"
     $uri = $null
-    try
+    if ($path)
     {
-        $uri = [uri] $Path
-    }
-    catch
-    {
-        Throw-InvalidArgumentException ($LocalizedData.InvalidPath -f $Path) "Path"
-    }
-    
-    if(-not @("file", "http", "https") -contains $uri.Scheme)
-    {
-        Trace-Message "The uri scheme was $uri.Scheme"
-        Throw-InvalidArgumentException ($LocalizedData.InvalidPath -f $Path) "Path"
-    }
-    
-    $pathExt = [System.IO.Path]::GetExtension($Path)
-    Trace-Message "The path extension was $pathExt"
-    if(-not @(".msi",".exe") -contains $pathExt.ToLower())
-    {
-        Throw-InvalidArgumentException ($LocalizedData.InvalidBinaryType -f $Path) "Path"
+        Trace-Message "Validate-StandardArguments, Path was $Path"
+        try
+        {
+            $uri = [uri] $Path
+        }
+        catch
+        {
+            Throw-InvalidArgumentException ($LocalizedData.InvalidPath -f $Path) "Path"
+        }
+        
+        if(-not @("file", "http", "https") -contains $uri.Scheme)
+        {
+            Trace-Message "The uri scheme was $uri.Scheme"
+            Throw-InvalidArgumentException ($LocalizedData.InvalidPath -f $Path) "Path"
+        }
+        
+        $pathExt = [System.IO.Path]::GetExtension($Path)
+        Trace-Message "The path extension was $pathExt"
+        if(-not @(".msi",".exe") -contains $pathExt.ToLower())
+        {
+            Throw-InvalidArgumentException ($LocalizedData.InvalidBinaryType -f $Path) "Path"
+        }
     }
     
     $identifyingNumber = $null
@@ -282,6 +284,32 @@ Function Get-ProductEntry
     return $null
 }
 
+Function Get-ProductId
+{
+    Param (
+        $PackageUri
+    )
+
+    if ($PackageUri.IsFile -eq $false)
+    {
+        $PackagePath = Invoke-DownloadFile $PackageUri
+    }
+    else {
+        $PackagePath = $PackageUri.OriginalString
+    }
+
+    $pn, $pc = Get-MsiProductEntry -Path $PackagePath
+    
+    #add the product code to global scope so that other functions can use it
+    if ($pc)
+    {
+        $Script:ProductCode = $pc
+    }
+    #Return product code
+    return $pc
+}
+
+
 function Test-TargetResource 
 {
     param
@@ -293,12 +321,10 @@ function Test-TargetResource
         [AllowEmptyString()]
         [string] $Name,
         
-        [parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
+        [parameter(Mandatory = $false)]
         [string] $Path,
         
         [parameter(Mandatory = $true)]
-        [AllowEmptyString()]
         [string] $ProductId,
         
         [string] $Arguments,
@@ -318,7 +344,24 @@ function Test-TargetResource
         [string] $InstalledCheckRegValueData
     )
     
+    if ([String]::IsNullOrEmpty($Path))
+    {
+        $Path = $null
+    }
+
+    if ([String]::IsNullOrEmpty($ProductId))
+    {
+        $ProductId = $null
+    }
+
+
     $uri, $identifyingNumber = Validate-StandardArguments $Path $ProductId $Name
+    if (($ProductId -eq "auto") -and ($null -ne $path))
+    {
+        #Attempt to get product id from msi
+        $identifyingNumber = Get-ProductId -PackageUri $uri
+    }
+
     $product = Get-ProductEntry $Name $identifyingNumber $InstalledCheckRegKey $InstalledCheckRegValueName $InstalledCheckRegValueData
     Trace-Message "Ensure is $Ensure"
     if($product)
@@ -362,6 +405,11 @@ function Test-TargetResource
 
     }
     
+    #if we're unable to grab identifying number and state is absent, then always return false since we dont know the state
+    if (($null -eq $identifyingNumber ) -and ($Ensure -eq "Absent"))
+    {
+        $res = $False
+    }
     return $res
 }
 
@@ -389,12 +437,10 @@ function Get-TargetResource
         [AllowEmptyString()]
         [string] $Name,
         
-        [parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
+        [parameter(Mandatory = $false)]
         [string] $Path,
         
-        [parameter(Mandatory = $true)]
-        [AllowEmptyString()]
+        [parameter(Mandatory = $false)]
         [string] $ProductId,
 
         [string] $InstalledCheckRegKey,
@@ -403,10 +449,24 @@ function Get-TargetResource
 
         [string] $InstalledCheckRegValueData
     )
-    
+
+    if ([String]::IsNullOrEmpty($Path))
+    {
+        $Path = $null
+    }
+
+    if ([String]::IsNullOrEmpty($ProductId))
+    {
+        $ProductId = $null
+    }
+
     #If the user gave the ProductId then we derive $identifyingNumber
     $uri, $identifyingNumber = Validate-StandardArguments $Path $ProductId $Name
-    
+    if (($ProductId -eq "auto") -and ($null -ne $path))
+    {
+        #Attempt to get product id from msi
+        $identifyingNumber = Get-ProductId -PackageUri $uri
+    }
     $localMsi = $uri.IsFile -and -not $uri.IsUnc
     
     $product = Get-ProductEntry $Name $identifyingNumber $InstalledCheckRegKey $InstalledCheckRegValueName $InstalledCheckRegValueData
@@ -483,7 +543,7 @@ function Get-TargetResource
 
 Function Get-MsiTools
 {
-    if($script:MsiTools)
+    if(get-variable -Scope script -Name msitools -ErrorAction SilentlyContinue)
     {
         return $script:MsiTools
     }
@@ -555,8 +615,117 @@ Function Get-MsiProductEntry
     $pn = $tools::GetProductName($Path)
 
     $pc = $tools::GetProductCode($Path)
-
+    if ($null -eq $pc)
+    {
+        $Script:InvalidMsiFile = $true
+    }
     return $pn,$pc
+}
+
+Function Invoke-DownloadFile
+{
+    Param(
+        $Uri,
+        $Credential
+    )
+
+    if($uri.IsUnc -and $PSCmdlet.ShouldProcess($LocalizedData.MountSharePath, $null, $null))
+    {
+        $psdriveArgs = @{Name=([guid]::NewGuid());PSProvider="FileSystem";Root=(Split-Path $uri.LocalPath)}
+        if($Credential)
+        {
+            #We need to optionally include these and then splat the hash otherwise
+            #we pass a null for Credential which causes the cmdlet to pop a dialog up
+            $psdriveArgs["Credential"] = $Credential
+        }
+        
+        $psdrive = New-PSDrive @psdriveArgs
+        $Path = Join-Path $psdrive.Root (Split-Path -Leaf $uri.LocalPath) #Necessary?
+    }
+    elseif(@("http", "https") -contains $uri.Scheme -and $PSCmdlet.ShouldProcess($LocalizedData.DownloadHTTPFile, $null, $null))
+    {
+        $scheme = $uri.Scheme
+        $outStream = $null
+        $responseStream = $null
+
+        try
+        {
+            Trace-Message "Creating cache location"
+
+            if(-not (Test-Path -PathType Container $CacheLocation))
+            {
+                mkdir $CacheLocation | Out-Null
+            }
+        
+            $destName = Join-Path $CacheLocation (Split-Path -Leaf $uri.LocalPath)
+        
+            Trace-Message "Need to download file from $scheme, destination will be $destName"
+
+            try
+            {
+                Trace-Message "Creating the destination cache file"
+                $outStream = New-Object System.IO.FileStream $destName, "Create"
+            }
+            catch
+            {
+                #Should never happen since we own the cache directory
+                Throw-TerminatingError ($LocalizedData.CouldNotOpenDestFile -f $destName) $_
+            }
+
+            try
+            {
+                Trace-Message "Creating the $scheme stream"
+                $request = [System.Net.WebRequest]::Create($uri)
+                Trace-Message "Setting default credential"
+                $request.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+                if ($scheme -eq "http")
+                {
+                    Trace-Message "Setting authentication level"
+                    # default value is MutualAuthRequested, which applies to https scheme
+                    $request.AuthenticationLevel = [System.Net.Security.AuthenticationLevel]::None                            
+                }
+                if ($scheme -eq "https")
+                {
+                    Trace-Message "Ignoring bad certificates"
+                    $request.ServerCertificateValidationCallBack = {$true}
+                }
+                Trace-Message "Getting the $scheme response stream"
+                $responseStream = (([System.Net.HttpWebRequest]$request).GetResponse()).GetResponseStream()
+            }
+            catch
+            {
+                    Trace-Message ("Error: " + ($_ | Out-String))
+                    Throw-TerminatingError ($LocalizedData.CouldNotGetHttpStream -f $scheme, $Path) $_
+            }
+
+            try
+            {
+                Trace-Message "Copying the $scheme stream bytes to the disk cache"
+                $responseStream.CopyTo($outStream)
+                $responseStream.Flush()
+                $outStream.Flush()
+            }
+            catch
+            {
+                Throw-TerminatingError ($LocalizedData.ErrorCopyingDataToFile -f $Path,$destName) $_
+            }
+        }
+        finally
+        {
+            if($outStream)
+            {
+                $outStream.Close()
+            }
+            
+            if($responseStream)
+            {
+                $responseStream.Close()
+            }
+        }
+        Trace-Message "Setting a global var for downloaded package so that it's available to set-targetresource"
+        $Script:DownloadedPackage = $Destname
+        return $destname
+    }
 }
 
 
@@ -572,12 +741,10 @@ function Set-TargetResource
         [AllowEmptyString()]
         [string] $Name,
         
-        [parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
+        [parameter(Mandatory = $false)]
         [string] $Path,
         
-        [parameter(Mandatory = $true)]
-        [AllowEmptyString()]
+        [parameter(Mandatory = $false)]
         [string] $ProductId,
         
         [string] $Arguments,
@@ -598,7 +765,34 @@ function Set-TargetResource
     )
     
     $ErrorActionPreference = "Stop"
-    
+    $PathIsNull = $False
+    if ([String]::IsNullOrEmpty($Path))
+    {
+        $Path = $null
+        $PathIsNull = $true
+    }
+
+    if ([String]::IsNullOrEmpty($ProductId))
+    {
+        $ProductId = $null
+    }
+
+    $PackageAlreadyDownloaded = $False
+    if (Get-Variable -scope Script -name DownloadedPackage -ErrorAction SilentlyContinue)
+    {
+        $Path = $Script:DownloadedPackage
+        $PackageAlreadyDownloaded = $True
+    }
+    if ($PathIsNull -and $Ensure -eq "Present")
+    {
+        Throw-TerminatingError "Parameter path missing" $_
+    }
+
+    if (Get-Variable -scope Script -name ProductCode -ErrorAction SilentlyContinue)
+    {
+        $ProductId = $Script:ProductCode
+    }
+
     if((Test-TargetResource -Ensure $Ensure -Name $Name -Path $Path -ProductId $ProductId `
         -InstalledCheckRegKey $InstalledCheckRegKey -InstalledCheckRegValueName $InstalledCheckRegValueName `
         -InstalledCheckRegValueData $InstalledCheckRegValueData))
@@ -607,7 +801,11 @@ function Set-TargetResource
     }
 
     $uri, $identifyingNumber = Validate-StandardArguments $Path $ProductId $Name
-    
+    if (($ProductId -eq "auto") -and ($null -ne $path))
+    {
+        #Attempt to get product id from msi
+        $identifyingNumber = Get-ProductId -PackageUri $uri
+    }
     #Path gets overwritten in the download code path. Retain the user's original Path in case the install succeeded
     #but the named package wasn't present on the system afterward so we can give a better message
     $OrigPath = $Path
@@ -623,7 +821,15 @@ function Set-TargetResource
     $downloadedFileName = $null
     try
     {
-        $fileExtension = [System.IO.Path]::GetExtension($Path).ToLower()
+        if ($PathIsNull -eq $False)
+        {
+            $fileExtension = [System.IO.Path]::GetExtension($Path).ToLower()
+        }
+        else {
+            #mock msi if path wasn't specified
+            $fileExtension = ".msi"
+        }
+        
         if($LogPath)
         {
             try
@@ -657,106 +863,21 @@ function Set-TargetResource
         #Download or mount file as necessary
         if(-not ($fileExtension -eq ".msi" -and $Ensure -eq "Absent"))
         {
-            if($uri.IsUnc -and $PSCmdlet.ShouldProcess($LocalizedData.MountSharePath, $null, $null))
+            if (($Uri.IsFile -eq $False) -and ($PackageAlreadyDownloaded -eq $False))
             {
-                $psdriveArgs = @{Name=([guid]::NewGuid());PSProvider="FileSystem";Root=(Split-Path $uri.LocalPath)}
-                if($Credential)
-                {
-                    #We need to optionally include these and then splat the hash otherwise
-                    #we pass a null for Credential which causes the cmdlet to pop a dialog up
-                    $psdriveArgs["Credential"] = $Credential
-                }
-                
-                $psdrive = New-PSDrive @psdriveArgs
-                $Path = Join-Path $psdrive.Root (Split-Path -Leaf $uri.LocalPath) #Necessary?
+                $Path = $downloadedFileName = Invoke-DownloadFile -uri $uri -Credential $Credential
             }
-            elseif(@("http", "https") -contains $uri.Scheme -and $Ensure -eq "Present" -and $PSCmdlet.ShouldProcess($LocalizedData.DownloadHTTPFile, $null, $null))
+            Elseif ($Uri.IsFile -eq $True)
             {
-                $scheme = $uri.Scheme
-                $outStream = $null
-                $responseStream = $null
-
-                try
-                {
-                    Trace-Message "Creating cache location"
-
-                    if(-not (Test-Path -PathType Container $CacheLocation))
-                    {
-                        mkdir $CacheLocation | Out-Null
-                    }
-                
-                    $destName = Join-Path $CacheLocation (Split-Path -Leaf $uri.LocalPath)
-                
-                    Trace-Message "Need to download file from $scheme, destination will be $destName"
-
-                    try
-                    {
-                        Trace-Message "Creating the destination cache file"
-                        $outStream = New-Object System.IO.FileStream $destName, "Create"
-                    }
-                    catch
-                    {
-                        #Should never happen since we own the cache directory
-                        Throw-TerminatingError ($LocalizedData.CouldNotOpenDestFile -f $destName) $_
-                    }
-
-                    try
-                    {
-                        Trace-Message "Creating the $scheme stream"
-                        $request = [System.Net.WebRequest]::Create($uri)
-                        Trace-Message "Setting default credential"
-                        $request.Credentials = [System.Net.CredentialCache]::DefaultCredentials
-                        if ($scheme -eq "http")
-                        {
-                            Trace-Message "Setting authentication level"
-                            # default value is MutualAuthRequested, which applies to https scheme
-                            $request.AuthenticationLevel = [System.Net.Security.AuthenticationLevel]::None                            
-                        }
-                        if ($scheme -eq "https")
-                        {
-                            Trace-Message "Ignoring bad certificates"
-                            $request.ServerCertificateValidationCallBack = {$true}
-                        }
-                        Trace-Message "Getting the $scheme response stream"
-                        $responseStream = (([System.Net.HttpWebRequest]$request).GetResponse()).GetResponseStream()
-                    }
-                    catch
-                    {
-                         Trace-Message ("Error: " + ($_ | Out-String))
-                         Throw-TerminatingError ($LocalizedData.CouldNotGetHttpStream -f $scheme, $Path) $_
-                    }
-
-                    try
-                    {
-                        Trace-Message "Copying the $scheme stream bytes to the disk cache"
-                        $responseStream.CopyTo($outStream)
-                        $responseStream.Flush()
-                        $outStream.Flush()
-                    }
-                    catch
-                    {
-                        Throw-TerminatingError ($LocalizedData.ErrorCopyingDataToFile -f $Path,$destName) $_
-                    }
-                }
-                finally
-                {
-                    if($outStream)
-                    {
-                        $outStream.Close()
-                    }
-                    
-                    if($responseStream)
-                    {
-                        $responseStream.Close()
-                    }
-                }
-                Trace-Message "Redirecting package path to cache file location"
-                $Path = $downloadedFileName = $destName
+                #Package is already local, do nada
             }
+            
         }
         
         #At this point the Path ought to be valid unless it's an MSI uninstall case
-        if(-not (Test-Path -PathType Leaf $Path) -and -not ($Ensure -eq "Absent" -and $fileExtension -eq ".msi"))
+        if (($Ensure -eq "Absent") -and ($fileExtension -eq ".msi"))
+        {}
+        elseif(-not (Test-Path -PathType Leaf $Path))
         {
             Throw-TerminatingError ($LocalizedData.PathDoesNotExist -f $Path)
         }
@@ -1257,13 +1378,13 @@ $params = Parse-Args $args;
 $result = New-Object psobject;
 Set-Attr $result "changed" $false;
 
-$path = Get-Attr -obj $params -name path -failifempty $true -resultobj $result
+$path = Get-Attr -obj $params -name path -failifempty $false
 $name = Get-Attr -obj $params -name name -default $path
-$productid = Get-Attr -obj $params -name productid
+$productid = Get-Attr -obj $params -name productid -failifempty $false
 if ($productid -eq $null)
 {
     #Alias added for backwards compat.
-    $productid = Get-Attr -obj $params -name product_id -failifempty $true -resultobj $result
+    $productid = Get-Attr -obj $params -name product_id -resultobj $result -failifempty $true
 }
 $arguments = Get-Attr -obj $params -name arguments
 $ensure = Get-Attr -obj $params -name state -default "present"
@@ -1275,14 +1396,33 @@ $username = Get-Attr -obj $params -name user_name
 $password = Get-Attr -obj $params -name user_password
 $return_code = Get-Attr -obj $params -name expected_return_code -default 0
 
+if (($ensure -eq "present") -and ($null -eq $path))
+{
+    #If "present", we need a package path
+    Fail-Json -obj $result -message 'parameter "path" is required when state is set to "present"'
+}
+
+if (($ensure -eq "absent") -and ("auto" -eq $productid) -and ($null -eq $path))
+{
+    Fail-Json -obj $result -message 'parameter "productid" is required and can not be set to "auto" when "path" is null and state is set to "absent"'
+}
+
 #Construct the DSC param hashtable
 $dscparams = @{
     name=$name
-    path=$path
-    productid = $productid
     arguments = $arguments
     ensure = $ensure
     returncode = $return_code
+}
+
+if (($productid) -and ($productid.length -gt 0))
+{
+    $dscparams.add("productid", $productid)
+}
+
+if (($path) -and ($path.length -gt 0))
+{
+    $dscparams.add("path", $path)
 }
 
 if (($username -ne $null) -and ($password -ne $null))
@@ -1303,6 +1443,16 @@ if ($testdscresult -eq $true)
 }
 Else
 {
+    #Check if the "invalidmsifile" has been set, exit if it has
+    if ($productid -eq "auto")
+    {
+        if (Get-Variable -scope Script -Name InvalidMsiFile)
+        {
+            fail-json -obj $result -message "Product Id was set to auto, but Ansible was unable to read the package product id automatically"
+        }
+    }
+
+
     try
     {
         set-TargetResource @dscparams

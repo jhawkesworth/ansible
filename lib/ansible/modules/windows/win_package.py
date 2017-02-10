@@ -37,8 +37,8 @@ description:
 options:
   path:
     description:
-      - Location of the package to be installed (either on file system, network share or url)
-    required: true
+      - Location of the package to be installed (either on file system, network share or url). Required unless state is absent, and the package is an msi-type file
+    required: false
   name:
     description:
       - Name of the package, if name isn't specified the path will be used for log messages
@@ -48,6 +48,7 @@ options:
     description:
       - Product id of the installed package (used for checking if already installed)
       - You can find product ids for installed programs in the windows registry either in C(HKLM:Software\Microsoft\Windows\CurrentVersion\Uninstall) or for 32 bit programs C(HKLM:Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall)'
+      - For msi-based files you can set this to "auto", which will cause Ansible to attempt to infer the product id from the package file. Note that for non-local files (unc or http/https) this will cause the package file to be downloaded every time
     required: true
     aliases: [productid]
   arguments:
@@ -120,4 +121,18 @@ EXAMPLES = r'''
       arguments: '/q /norestart'
       ensure: present
       expected_return_code: [0,3010]
+
+# Install an msi-based package without specifying the product id. This will download the package from the server on every run:
+  - name: install an msi without product id
+    win_package:
+      name: NotepadPlusPlus
+      path: "http://mywebserver.com/npp.6.9.2.installer.msi"
+      productid: auto
+
+#Uninstall an msi-based package without specifying path
+  - name: SUCEEDS uninstall an msi with product id but without path
+    win_package:
+      name: NodeJS
+      productid: "{A41A3BCF-14F8-4984-AE4E-DA662A6992B7}"
+      state: absent
 '''

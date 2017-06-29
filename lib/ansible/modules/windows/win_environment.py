@@ -76,6 +76,10 @@ notes:
      therefore will need restarting to pick up new environment settings.
      User level environment variables will require the user to log out
      and in again before they become available.
+   - Due to the way ansible re-uses remote shells, if you need an environment
+     variable to be effective before the end of the current playbook run
+     you have two options, either use M(win_reboot) to reboot the machine,
+     or re-run the M(setup) module, which will open a new remote shell.
 '''
 
 EXAMPLES = r'''

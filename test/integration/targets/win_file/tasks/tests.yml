@@ -354,7 +354,7 @@
 #    that:
 ##    - result.stat.mode == '0644'
 
-- name: Create a directory
+- name: Create a directory (dirtest)
   win_file:
     path: '{{ win_output_dir }}\dirtest'
     state: directory
@@ -365,12 +365,22 @@
     path: '{{ win_output_dir }}\dirtest'
   register: stat_result
 
-- name: Assert the directory was created
+# here is where it fails in check mode
+- name: Assert the directory was created (not check mode)
   assert:
     that:
        - file_result.changed == True
        - stat_result.stat.exists
        - stat_result.stat.isdir
+  when: not in_check_mode
+
+- name: Assert the directory was not really created (check mode)
+  assert:
+    that:
+       - file_result.changed == True
+       - stat_result.stat.exists == False
+# not defined if not exists      - stat_result.stat.isdir
+  when: in_check_mode
 
 - name: Re-run create directory (bug 2147)
   win_file:
@@ -395,8 +405,8 @@
   assert:
     that:
        - file_result.changed == True
-       - stat_result.stat.exists
-       - stat_result.stat.isdir
+       - stat_result.stat.exists == False
+# not defined if not exists      - stat_result.stat.isdir
   when: in_check_mode
 
 - name: Remove empty dir we just created
@@ -415,6 +425,15 @@
     that:
        - file_result.changed == True
        - stat_result.stat.exists == False
+  when: not in_check_mode
+
+- name: Assert the directory does not exist
+  assert:
+    that:
+       - file_result.changed == False
+       - stat_result.stat.exists == False
+  when: in_check_mode
+
 
 - name: Create dir with spaces and parens in the dir name
   win_file:
@@ -433,6 +452,15 @@
        - file_result.changed == True
        - stat_result.stat.exists
        - stat_result.stat.isdir
+  when: not in_check_mode
+
+- name: Check dir with spaces and parens in the dir name has been created
+  assert:
+    that:
+       - file_result.changed == True
+       - stat_result.stat.exists == False
+#       - stat_result.stat.isdir
+  when: in_check_mode
 
 - name: Remove dir with spaces and parens in the dir name
   win_file:
@@ -450,6 +478,14 @@
     that:
        - file_result.changed == True
        - stat_result.stat.exists == False
+  when: not in_check_mode
+
+- name: Assert dir with spaces and parens in the dir name was removed
+  assert:
+    that:
+       - file_result.changed == False
+       - stat_result.stat.exists == False
+  when: in_check_mode
 
 - name: Create folder to point set symbolic link for
   win_file:

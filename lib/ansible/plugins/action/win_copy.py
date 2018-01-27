@@ -500,6 +500,8 @@ class ActionModule(ActionBase):
                                                  task_vars, tmp)
 
             result['changed'] = True
+            if self._play_context.diff and not raw:
+               result['diff'].append(self._get_diff_data(dest, file_src, task_vars))
             if copy_result.get('failed') is True:
                 result['failed'] = True
                 result['msg'] = "failed to copy file %s: %s" % (file_src, copy_result['msg'])

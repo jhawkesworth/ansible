@@ -904,7 +904,11 @@ class ActionBase(with_metaclass(ABCMeta, object)):
 
         diff = {}
         display.debug("Going to peek to see if file has changed permissions")
-        peek_result = self._execute_module(module_name='file', module_args=dict(path=destination, diff_peek=True), task_vars=task_vars, persist_files=True)
+
+        if self._connection._shell.SHELL_FAMILY == 'powershell':
+        	peek_result = self._execute_module(module_name='win_file', module_args=dict(path=destination, diff_peek=True), task_vars=task_vars, persist_files=True)
+        else:
+        	peek_result = self._execute_module(module_name='file', module_args=dict(path=destination, diff_peek=True), task_vars=task_vars, persist_files=True)
 
         if not peek_result.get('failed', False) or peek_result.get('rc', 0) == 0:
 

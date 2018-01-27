@@ -12,6 +12,8 @@ $params = Parse-Args $args -supports_check_mode $true
 
 $check_mode = Get-AnsibleParam -obj $params -name "_ansible_check_mode" -default $false
 
+$diff_peek = Get-Attr $params "diff_peek" $FALSE
+
 $path = Get-AnsibleParam -obj $params -name "path" -type "path" -failifempty $true -aliases "dest","name"
 $state = Get-AnsibleParam -obj $params -name "state" -type "str" -validateset "absent","directory","file","touch"
 
@@ -19,6 +21,10 @@ $result = @{
     changed = $false
 }
 
+$diff = @{
+    before = @{ path = $path }
+    after  = @{ path = $path }
+}
 # Used to delete symlinks as powershell cannot delete broken symlinks
 $symlink_util = @"
 using System;
@@ -66,6 +72,45 @@ function Remove-Directory($directory, $checkmode) {
     Remove-Item -Path $directory.FullName -Force -Recurse -WhatIf:$checkmode
 }
 
+function Get-State($path) {
+  If (Test-Path $path) {
+     $existing_info = Get-Item $path
+     # TODO detect links
+     If ($existing_info.PSIsContainer) {
+	return 'directory' 
+     }
+     return 'file'
+  }
+  return 'absent' 
+}
+
+# short circuit for diff_peek
+If ( $diff_peek )
+{
+    $appears_binary = $False
+    $res_state = "absent"
+    $path_exists = Test-Path $path
+    If($path_exists)
+    {
+        $res_state = "present"
+        $byteArray = Get-Content -Path $Path -Encoding Byte -TotalCount 8192
+        If ($byteArray -contains 0)
+        {
+            $appears_binary = $True
+        }
+
+        $diff_info = Get-Item $path
+        #$result.is_directory = $diff_info.PsIsContainer
+        $result.size = $diff_info.Length
+        $result.created_utc = $diff_info.CreationTimeUtc.ToString("s")
+        #$result.operation = 'diff_peek'
+    }
+    $result.appears_binary = $appears_binary
+    $result.state  = $res_state
+    Exit-Json $result
+}
+
+$prev_state = Get-State($path)
 
 if ($state -eq "touch") {
     if (Test-Path -Path $path) {
@@ -124,4 +169,9 @@ if (Test-Path -Path $path) {
 
 }
 
+If ($prev_state -ne $state) {
+   $diff["before"].Add('state', $prev_state)
+   $diff["after"].Add('state', $state)
+   $result["diff"] = $diff
+}
 Exit-Json $result
